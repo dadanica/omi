@@ -1,4 +1,4 @@
-"""可爱咪技术验证 02：stdlib WSGI + SQLite。仅虚构测试数据。
+"""omi技术验证 02：stdlib WSGI + SQLite。仅虚构测试数据。
 
 无微信登录、模型、向量、媒体存储或生产部署。离线签发随机实验凭证；
 请求不能选择用户身份。跨实例使用同一 SQLite 文件，权限由数据库决定。
@@ -33,6 +33,7 @@ class Fault(Exception):
 
 
 class Lab:
+    request_limits = {}
     def __init__(self, path):
         self.path = str(path)
         with self.db() as con:
@@ -212,7 +213,7 @@ class Lab:
                 size = int(environ.get('CONTENT_LENGTH') or 0)
             except ValueError:
                 raise Fault(400, '请求长度无效')
-            if size < 0 or size > 32768:
+            if size < 0 or size > self.request_limits.get(environ.get('PATH_INFO'), 32768):
                 raise Fault(413, '请求过大')
             raw = environ['wsgi.input'].read(size) if size else b'{}'
             try:

@@ -38,8 +38,9 @@ class PreviewTests(unittest.TestCase):
     def test_static_home(self):
         meta,body=self.request('/')
         self.assertEqual(meta['code'],200)
-        for entry in ['共同聊天','我的个人空间','与咪单独聊聊']:
+        for entry in ['共同聊天','与 omi 单独聊聊','/organizer.js']:
             self.assertIn(entry,body.decode())
+        self.assertNotIn('data-page="personal"',body.decode())
         self.assertIn('Content-Security-Policy',meta['headers'])
 
     def test_assets(self):
@@ -118,6 +119,40 @@ class PreviewTests(unittest.TestCase):
         mid=self.request('/v1/messages','POST',{'space_id':'personal:A','text':'重启仍在','client_id':'restart'})[1]['message_id']
         self.web=Web(Prototype(self.lab.path))
         self.assertEqual(self.request('/v1/messages/'+mid)[1]['body'],'重启仍在')
+
+    def test_organizer_keeps_ideas_separate_from_reminder_limit(self):
+        self.login('A')
+        base = '/v1/organizer/'
+        for i in range(10):
+            self.assertEqual(self.request(base+'reminders','POST',{'text':f'提醒 {i}'})[0]['code'],200)
+        self.assertEqual(self.request(base+'reminders','POST',{'text':'超额'})[0]['code'],409)
+        self.assertEqual(self.request(base+'ideas','POST',{'text':'新的想法'})[0]['code'],200)
+        reminders = self.request(base+'reminders')[1]['items']
+        item = reminders[0]['id']
+        self.assertEqual(self.request(base+'reminders/'+item,'PATCH',{'done':True})[0]['code'],200)
+        self.assertEqual(self.request(base+'reminders')[1]['items'][0]['done'],1)
+        self.login('B')
+        self.assertEqual(self.request(base+'ideas')[1]['items'],[])
+        self.assertEqual(self.request(base+'reminders/'+item,'DELETE')[0]['code'],404)
+
+    def test_shared_organizer_records_and_permissions(self):
+        self.login('A')
+        base = '/v1/organizer/'
+        self.assertEqual(self.request(base+'events','POST',{'text':'生日','day':'2026-02-30'})[0]['code'],400)
+        event = self.request(base+'events','POST',{'text':'生日','day':'2026-11-22','annual':True})[1]['id']
+        self.assertEqual(self.request(base+'wishes','POST',{'text':'一起看星星'})[0]['code'],200)
+        self.assertEqual(self.request(base+'profiles','POST',{'text':'喜欢绿茶','owner':'B'})[0]['code'],200)
+        self.assertEqual(self.request(base+'quotes','POST',{'source':'a09'})[0]['code'],404)
+        self.assertEqual(self.request(base+'quotes','POST',{'source':'s11'})[0]['code'],200)
+        self.login('B')
+        self.assertEqual(self.request(base+'profiles')[1]['items'][0]['owner'],'A')
+        self.assertEqual(self.request(base+'events')[1]['items'][0]['annual'],1)
+        self.assertEqual(self.request(base+'wishes')[1]['items'][0]['day'],'')
+        self.assertEqual(self.request(base+'quotes')[1]['items'][0]['sender'],'A')
+        self.assertEqual(self.request(base+'events/'+event,'DELETE')[0]['code'],404)
+        self.login('A')
+        self.assertEqual(self.request('/v1/messages/s11','DELETE')[0]['code'],200)
+        self.assertEqual(self.request(base+'quotes')[1]['items'],[])
 
 
 if __name__=='__main__':

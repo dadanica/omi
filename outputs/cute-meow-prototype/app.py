@@ -1,4 +1,4 @@
-"""Local, fictional-account UI preview for 可爱咪. No model calls."""
+"""Local, fictional-account UI preview for omi. No model calls."""
 import argparse
 import json
 import mimetypes
@@ -15,9 +15,15 @@ from wsgiref.simple_server import make_server, WSGIRequestHandler, WSGIServer
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent / 'memory-backend'))
 from server import Lab, Fault
+from organizer import create_organizer_table, organizer_request
+import discoveries
+import preferences
+import dialogues
 
 
 class Prototype(Lab):
+    request_limits = {'/v1/organizer/voices': 3 * 1024 * 1024}
+    request_limits.update({'/v1/rooms/'+key+'/organizer/voices':3*1024*1024 for key in dialogues.FRIENDS})
     def __init__(self, db_path):
         super().__init__(db_path)
         with self.db() as c:
@@ -33,11 +39,15 @@ class Prototype(Lab):
         else:
             fixture = json.loads((HERE.parent/'memory-backend/fixture.json').read_text())
         with self.db() as c:
+            create_organizer_table(c)
+            discoveries.setup(c)
+            preferences.setup(c)
             c.execute('CREATE TABLE IF NOT EXISTS message_meta(id TEXT PRIMARY KEY REFERENCES messages(id),created_at TEXT NOT NULL,tags TEXT NOT NULL)')
             for r in fixture:
                 if c.execute('SELECT 1 FROM messages WHERE id=?',(r['id'],)).fetchone():
                     c.execute('INSERT OR IGNORE INTO message_meta VALUES (?,?,?)',(r['id'],r['date']+'T10:00:00+08:00',json.dumps(r.get('topics',[]),ensure_ascii=False)))
             c.execute("INSERT OR IGNORE INTO message_meta SELECT id,'2026-11-10T10:00:00+08:00','[]' FROM messages")
+            dialogues.setup(c)
 
     def demo_session(self, uid):
         if uid not in ('A','B'):
@@ -55,22 +65,57 @@ class Prototype(Lab):
             with self.db() as c:
                 c.execute('INSERT OR IGNORE INTO message_meta VALUES (?,?,?)',(mid,time.strftime('%Y-%m-%dT%H:%M:%SZ',time.gmtime()),'["随手记"]'))
             self.process_job('job:'+mid)
+            with self.db() as c:
+                if c.execute("SELECT 1 FROM messages WHERE id=? AND space_id='shared'",(mid,)).fetchone():
+                    c.execute('BEGIN IMMEDIATE')
+                    discoveries.collect(c, discoveries.shared(c))
             return result
         with self.db() as c:
             c.execute('BEGIN IMMEDIATE')
             uid = self.authenticate(c,token)
+            room='shared'
+            if path.startswith('/v1/rooms/'):
+                key,_,tail=path[len('/v1/rooms/'):].partition('/')
+                room=dialogues.room(uid,key)
+                if key not in dialogues.FRIENDS or not self.permitted(c,uid,room):
+                    raise Fault(404,'共同空间不可用')
+                path='/v1/'+tail
+                if path=='/v1/search' and method=='POST':
+                    query=data.get('query')
+                    if not isinstance(query,str) or not query.strip(): raise Fault(400,'请输入关键词')
+                    rows=c.execute('SELECT m.id AS message_id,m.body,t.created_at FROM messages m JOIN message_meta t ON m.id=t.id WHERE space_id=? AND deleted=0 AND instr(body,?)>0 ORDER BY created_at DESC',(room,query))
+                    return {'results':[dict(r) for r in rows]}
+                if not (tail=='preferences' or tail.split('/')[0]=='discoveries' or (tail.startswith('organizer/') and tail.split('/')[1] in ('quotes','profiles','events','voices'))):
+                    raise Fault(404,'入口不存在')
+            if path=='/v1/reflect' and method=='POST':
+                return dialogues.reflect(c,uid,data,self.permitted)
+            if path=='/v1/preferences':
+                if not self.permitted(c,uid,room):
+                    raise Fault(404,'共同空间不可用')
+                return preferences.handle(c,uid,method,data,room)
+            if path=='/v1/discoveries' or path.startswith('/v1/discoveries/'):
+                if not self.permitted(c,uid,room):
+                    raise Fault(404,'共同空间不可用')
+                return discoveries.handle(c,uid,method,path,data,room)
+            if path.startswith('/v1/organizer/'):
+                return organizer_request(c, uid, method, path, data, self.permitted,room)
             if method=='GET' and path=='/v1/spaces':
                 return {'user':uid,'spaces':[dict(r) for r in c.execute('SELECT s.id,s.kind FROM spaces s JOIN members m ON m.space_id=s.id WHERE m.user_id=? AND m.active=1',(uid,))]}
             if method=='GET' and (path.startswith('/v1/conversation/') or path.startswith('/v1/memories/')):
                 kind = path.rsplit('/',1)[1]
-                if kind not in ('shared','personal','assistant'):
+                if kind not in ('shared','personal','assistant',*dialogues.FRIENDS):
                     raise Fault(404,'空间不可用')
-                sid = 'shared' if kind=='shared' else kind+':'+uid
+                sid = dialogues.room(uid,kind) if kind in ('shared',*dialogues.FRIENDS) else kind+':'+uid
                 if not self.permitted(c,uid,sid):
                     raise Fault(404,'空间不可用')
                 if path.startswith('/v1/conversation/'):
                     rows=c.execute('SELECT x.id,x.space_id,x.sender,x.body,t.created_at FROM messages x LEFT JOIN message_meta t ON t.id=x.id WHERE x.space_id=? AND x.deleted=0 ORDER BY t.created_at,x.rowid',(sid,)).fetchall()
-                    return {'messages':[dict(r) for r in rows],'user':uid}
+                    result=[dict(r) for r in rows]
+                    if kind=='assistant':
+                        refs={r[0]:json.loads(r[1]) for r in c.execute('SELECT reply,refs FROM reflection_turns WHERE owner=?',(uid,))}
+                        for msg in result:
+                            msg['refs']=refs.get(msg['id'],[])
+                    return {'messages':result,'user':uid}
                 rows=c.execute('SELECT m.id,m.body,s.message_id,t.created_at,t.tags FROM memories m JOIN sources s ON s.memory_id=m.id JOIN messages x ON x.id=s.message_id LEFT JOIN message_meta t ON t.id=x.id WHERE m.space_id=? AND m.valid=1 AND x.deleted=0 AND x.version=s.source_version AND x.space_id=m.space_id ORDER BY t.created_at DESC,x.rowid DESC',(sid,)).fetchall()
                 return {'memories':[dict(r,tags=json.loads(r['tags'] or '[]')) for r in rows],'mode':'original_records_not_ai_summaries'}
         return super().dispatch(token,method,path,data)
@@ -121,7 +166,7 @@ class Web:
         if static not in file.parents or not file.is_file():
             return self.respond(start,'404 Not Found',{'error':'页面不存在'})
         mime=mimetypes.guess_type(str(file))[0] or 'application/octet-stream'
-        return self.respond(start,'200 OK',file.read_bytes(),mime,extra=[('Content-Security-Policy',"default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; object-src 'none'; frame-ancestors 'none'")])
+        return self.respond(start,'200 OK',file.read_bytes(),mime,extra=[('Content-Security-Policy',"default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; media-src 'self' data:; connect-src 'self'; object-src 'none'; frame-ancestors 'none'")])
 
 
 class QuietHandler(WSGIRequestHandler):
@@ -141,6 +186,6 @@ if __name__=='__main__':
     args=parser.parse_args()
     Path(args.db).parent.mkdir(parents=True,exist_ok=True)
     with make_server('127.0.0.1',args.port,Web(Prototype(args.db)),server_class=ThreadingWSGIServer,handler_class=QuietHandler) as server:
-        print('可爱咪本地体验：http://127.0.0.1:'+str(args.port),flush=True)
+        print('omi 本地体验：http://127.0.0.1:'+str(args.port),flush=True)
         print('仅虚构体验账号；AI、媒体上传和微信登录未接入。',flush=True)
         server.serve_forever()
