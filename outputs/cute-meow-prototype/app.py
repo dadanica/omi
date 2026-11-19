@@ -8,8 +8,9 @@ import sys
 import time
 from http.cookies import SimpleCookie
 from pathlib import Path
+from socketserver import ThreadingMixIn
 from urllib.parse import unquote
-from wsgiref.simple_server import make_server, WSGIRequestHandler
+from wsgiref.simple_server import make_server, WSGIRequestHandler, WSGIServer
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent / 'memory-backend'))
@@ -128,13 +129,18 @@ class QuietHandler(WSGIRequestHandler):
         pass
 
 
+class ThreadingWSGIServer(ThreadingMixIn, WSGIServer):
+    """Keep an incomplete browser connection from blocking local preview."""
+    daemon_threads = True
+
+
 if __name__=='__main__':
     parser=argparse.ArgumentParser()
     parser.add_argument('--port',type=int,default=8765)
     parser.add_argument('--db',default=str(HERE/'runtime'/'preview.sqlite'))
     args=parser.parse_args()
     Path(args.db).parent.mkdir(parents=True,exist_ok=True)
-    with make_server('127.0.0.1',args.port,Web(Prototype(args.db)),handler_class=QuietHandler) as server:
+    with make_server('127.0.0.1',args.port,Web(Prototype(args.db)),server_class=ThreadingWSGIServer,handler_class=QuietHandler) as server:
         print('可爱咪本地体验：http://127.0.0.1:'+str(args.port),flush=True)
         print('仅虚构体验账号；AI、媒体上传和微信登录未接入。',flush=True)
         server.serve_forever()
