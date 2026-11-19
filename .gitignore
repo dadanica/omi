@@ -1,0 +1,15 @@
+.DS_Store
+__pycache__/
+*.py[cod]
+runtime/
+*.sqlite*
+*.db
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.log
+node_modules/
+.venv/
+work/

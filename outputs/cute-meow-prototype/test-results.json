@@ -1,0 +1,8 @@
+{
+  "tests_run": 14,
+  "failures": 0,
+  "errors": 0,
+  "passed": true,
+  "method": "真实 WSGI 应用与独立 SQLite 数据库，不依赖网络",
+  "browser_qa": "未完成：浏览器访问本机预览的权限未获批准"
+}
